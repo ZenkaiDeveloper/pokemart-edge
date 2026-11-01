@@ -1,6 +1,7 @@
 /**
  * PokeMart Edge Worker — /account/* + /api/user/* + signed ladder export ingest
- * + M2.1 sold-evidence alerts (cron 10:00 UTC).
+ * + M2.1 sold-evidence alerts (cron 10:00 UTC)
+ * + M2.2 portfolio with cost basis.
  * Does not write price data except via authenticated Mac export.
  */
 import { asDb, countUserOwned } from "./ports/db";
@@ -19,6 +20,7 @@ import {
   accountPage,
   alertsPage,
   loginPage,
+  portfolioPage,
   unsubscribePage,
 } from "./html";
 import { ingestExport, verifyExportHmac } from "./export_ingest";
@@ -41,6 +43,16 @@ import { renderOptInEmail } from "./alerts/templates";
 import { buildUserRss } from "./alerts/rss";
 import { runAlertsCron } from "./alerts/run_cron";
 import { isoNow } from "./crypto_util";
+import {
+  createHolding,
+  deleteAllHoldings,
+  listHoldings,
+  migrateLocalLists,
+  recomputePortfolio,
+  softDeleteHolding,
+} from "./portfolio/holdings";
+import { holdingsToCsv, importCsvHoldings } from "./portfolio/import_csv";
+import { createShareLink, resolveShareView } from "./portfolio/share";
 
 function html(body: string, status = 200, headers: HeadersInit = {}): Response {
   return new Response(body, {
@@ -70,6 +82,29 @@ async function currentUser(
     .bind(sess.userId)
     .first<{ id: string; email: string; tier: string }>();
   return row || null;
+}
+
+async function renderPortfolio(
+  env: EdgeEnv,
+  req: Request,
+  user: { id: string; email: string },
+  extra: { notice?: string; error?: string; shareUrl?: string | null } = {},
+): Promise<Response> {
+  const origin = siteOrigin(env, req);
+  const db = asDb(env.DB);
+  const summary = await recomputePortfolio(db, user.id);
+  return html(
+    portfolioPage({
+      siteOrigin: origin,
+      email: user.email,
+      summary,
+      lines: summary.lines,
+      shareUrl: extra.shareUrl,
+      notice: extra.notice,
+      error: extra.error,
+      showCost: true,
+    }),
+  );
 }
 
 async function renderAlerts(
@@ -236,6 +271,181 @@ async function handleAccount(
         Location: `${origin}/account/login?deleted=1`,
         "Set-Cookie": clearSessionCookieHeader(),
       },
+    });
+  }
+
+  // --- M2.2 portfolio ---
+  if (path === "/account/portfolio/share/view" || path === "/account/portfolio/share/view/") {
+    const token = new URL(req.url).searchParams.get("token") || "";
+    const view = await resolveShareView(db, token);
+    if (!view.ok) {
+      return html(
+        loginPage({
+          siteOrigin: origin,
+          error:
+            view.error === "revoked"
+              ? "That share link was revoked."
+              : "That share link is not valid.",
+        }),
+        view.status,
+      );
+    }
+    return html(
+      portfolioPage({
+        siteOrigin: origin,
+        email: "shared",
+        summary: view.summary,
+        lines: view.summary.lines,
+        readOnly: true,
+        showCost: view.showCost,
+      }),
+    );
+  }
+
+  if (path === "/account/portfolio" || path === "/account/portfolio/") {
+    const user = await currentUser(env, req);
+    if (!user) {
+      return Response.redirect(`${origin}/account/login?next=%2Faccount%2Fportfolio`, 302);
+    }
+    if (req.method === "GET") return renderPortfolio(env, req, user);
+    if (req.method === "POST") {
+      const form = await req.formData();
+      const costRaw = String(form.get("cost_cents") || "").trim();
+      const result = await createHolding({
+        db,
+        userId: user.id,
+        printId: String(form.get("print_id") || ""),
+        gradeLabel: String(form.get("grade_label") || "Ungraded"),
+        qty: Number(form.get("qty") || 1),
+        costCents: costRaw === "" ? null : Number(costRaw),
+        acquiredOn: String(form.get("acquired_on") || "").trim() || null,
+      });
+      if (!result.ok) {
+        return renderPortfolio(env, req, user, { error: result.error });
+      }
+      return renderPortfolio(env, req, user, { notice: "Holding added." });
+    }
+    return json({ error: "method_not_allowed" }, 405);
+  }
+
+  if (path === "/account/portfolio/delete" || path === "/account/portfolio/delete/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const form = await req.formData();
+    const ok = await softDeleteHolding(db, user.id, String(form.get("id") || ""));
+    return renderPortfolio(env, req, user, {
+      notice: ok ? "Holding removed." : undefined,
+      error: ok ? undefined : "Holding not found.",
+    });
+  }
+
+  if (path === "/account/portfolio/clear" || path === "/account/portfolio/clear/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const n = await deleteAllHoldings(db, user.id);
+    return renderPortfolio(env, req, user, {
+      notice: `Cleared ${n} holding${n === 1 ? "" : "s"}.`,
+    });
+  }
+
+  if (path === "/account/portfolio/import" || path === "/account/portfolio/import/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const form = await req.formData();
+    const file = form.get("file");
+    let text = "";
+    if (file && typeof file === "object" && "text" in file) {
+      text = await (file as File).text();
+    } else {
+      text = String(form.get("csv") || "");
+    }
+    const result = await importCsvHoldings({
+      db,
+      userId: user.id,
+      csvText: text,
+      mapping: {
+        print_id: "print_id",
+        grade_label: "grade_label",
+        qty: "qty",
+        cost_cents: "cost_cents",
+        cost_dollars: "cost_dollars",
+        acquired_on: "acquired_on",
+        notes: "notes",
+      },
+    });
+    return renderPortfolio(env, req, user, {
+      notice: `Imported ${result.imported} · skipped ${result.skipped} · ${result.ms} ms`,
+      error: result.errors.length ? result.errors.slice(0, 5).join("; ") : undefined,
+    });
+  }
+
+  if (path === "/account/portfolio/export.csv" || path === "/account/portfolio/export.csv/") {
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const holdings = await listHoldings(db, user.id);
+    const csv = holdingsToCsv(holdings);
+    return new Response(csv, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="pokemart-portfolio.csv"',
+      },
+    });
+  }
+
+  if (path === "/account/portfolio/migrate" || path === "/account/portfolio/migrate/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const form = await req.formData();
+    let watchlist: Array<Record<string, unknown>> = [];
+    let collection: Array<Record<string, unknown>> = [];
+    try {
+      const raw = JSON.parse(String(form.get("local_json") || "null"));
+      if (Array.isArray(raw)) {
+        // Heuristic: collection rows often have qty; watchlist is flat Follow list.
+        const hasQty = raw.some(
+          (r) => r && typeof r === "object" && "qty" in (r as object),
+        );
+        if (hasQty) collection = raw;
+        else watchlist = raw;
+      } else if (raw && typeof raw === "object") {
+        if (Array.isArray(raw.items)) collection = raw.items;
+        else if (Array.isArray(raw.watchlist)) watchlist = raw.watchlist;
+        else if (Array.isArray(raw.collection)) collection = raw.collection;
+      }
+    } catch {
+      return renderPortfolio(env, req, user, { error: "invalid_json" });
+    }
+    const result = await migrateLocalLists({
+      db,
+      userId: user.id,
+      watchlist,
+      collection,
+    });
+    return renderPortfolio(env, req, user, {
+      notice: `Migrated +${result.added} · skipped ${result.skipped}`,
+    });
+  }
+
+  if (path === "/account/portfolio/share" || path === "/account/portfolio/share/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const form = await req.formData();
+    const showCost = String(form.get("show_cost") || "") === "1";
+    const link = await createShareLink({
+      db,
+      userId: user.id,
+      showCost,
+    });
+    const shareUrl = `${origin}/account/portfolio/share/view?token=${encodeURIComponent(link.rawToken)}`;
+    return renderPortfolio(env, req, user, {
+      notice: "Share link created (cost hidden by default unless checked).",
+      shareUrl,
     });
   }
 
@@ -426,6 +636,33 @@ async function handleApiUser(
     }
     return json({ error: "method_not_allowed" }, 405);
   }
+  if (path === "/api/user/portfolio" || path === "/api/user/portfolio/") {
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    if (req.method === "GET") {
+      const summary = await recomputePortfolio(db, user.id);
+      return json({ summary });
+    }
+    if (req.method === "POST") {
+      const body = (await req.json()) as Record<string, unknown>;
+      const result = await createHolding({
+        db,
+        userId: user.id,
+        printId: String(body.print_id || ""),
+        gradeLabel: String(body.grade_label || "Ungraded"),
+        qty: body.qty == null ? 1 : Number(body.qty),
+        costCents:
+          body.cost_cents == null || body.cost_cents === ""
+            ? null
+            : Number(body.cost_cents),
+        acquiredOn: body.acquired_on ? String(body.acquired_on) : null,
+        notes: body.notes ? String(body.notes) : null,
+      });
+      if (!result.ok) return json({ error: result.error }, result.status);
+      return json({ ok: true, holding: result.holding }, 201);
+    }
+    return json({ error: "method_not_allowed" }, 405);
+  }
   return json({ error: "not_found" }, 404);
 }
 
@@ -485,6 +722,7 @@ async function fetchHandler(req: Request, env: EdgeEnv): Promise<Response> {
       ok: true,
       service: "pokemart-edge",
       alerts: true,
+      portfolio: true,
       at: isoNow(),
     });
   }

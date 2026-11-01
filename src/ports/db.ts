@@ -34,6 +34,9 @@ export async function countUserOwned(
     "email_prefs",
     "rss_tokens",
     "alert_delivery_budget",
+    "holding",
+    "valuation_history",
+    "share_link",
   ] as const;
   const out: Record<string, number> = { users: 0 };
   const u = await db

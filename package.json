@@ -1,8 +1,8 @@
 {
   "name": "pokemart-edge",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": false,
-  "description": "PokeMart Edge — Cloudflare Worker + D1 magic-link accounts, nightly ladder export, and sold-evidence alerts (MIT)",
+  "description": "PokeMart Edge — Cloudflare Worker + D1 magic-link accounts, nightly ladder export, sold-evidence alerts, and portfolio cost basis (MIT)",
   "license": "MIT",
   "type": "module",
   "scripts": {

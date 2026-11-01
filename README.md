@@ -1,6 +1,6 @@
 # pokemart-edge
 
-MIT-licensed **Edge Worker** for [PokeMart](https://pokemart.online) — Cloudflare Worker + D1 for magic-link accounts, nightly HMAC ladder ingest, and **sold-evidence alerts** (email / Discord webhook / private RSS).
+MIT-licensed **Edge Worker** for [PokeMart](https://pokemart.online) — Cloudflare Worker + D1 for magic-link accounts, nightly HMAC ladder ingest, **sold-evidence alerts**, and **portfolio with cost basis**.
 
 Canonical open-source home: [`ZenkaiDeveloper/pokemart-edge`](https://github.com/ZenkaiDeveloper/pokemart-edge).  
 A copy also lives at `public_site/worker/pokemart-edge/` next to the other handwritten Workers (never inside the generated deploy tree).
@@ -11,10 +11,13 @@ A copy also lives at `public_site/worker/pokemart-edge/` next to the other handw
 |------|------|
 | `/account/*` | Magic-link sign-in, session cookie, logout, hard delete |
 | `/account/alerts` | Create / list / disable sold-evidence alert rules |
+| `/account/portfolio` | Holdings, cost basis, CSV import/export, migrate, share |
+| `/account/portfolio/share/view?token=` | Read-only shared portfolio (cost hidden by default) |
 | `/account/unsubscribe` | One-click email unsubscribe (no login) |
 | `/account/alerts/rss.xml?token=` | Private RSS feed |
 | `/api/user/me` | Current user JSON |
 | `/api/user/alerts` | JSON CRUD for rules |
+| `/api/user/portfolio` | JSON portfolio summary / add holding |
 | `/api/user/delete` | Hard-delete (JSON) |
 | `/api/internal/ladder-export` | Signed nightly ingest of `ladder_latest` (+ history while ≤20k writes) |
 | Cron `0 10 * * *` UTC | Evaluate rules → deliver pending events |
@@ -32,6 +35,15 @@ Static card pages stay on the assets Worker. Attach this Worker to `/account/*`,
 - Caps: 20 active rules / free user; 1 digest email / day; 3 immediate threshold emails / day
 - Idempotent events: `UNIQUE(rule_id, snapshot_date)`
 - **Excluded:** live listings, “undervalued”, restocks, auction-ending alerts
+
+## Portfolio (M2.2)
+
+- Schema: `holding`, `sale`, `valuation_history`, `share_link` (`migrations/0003_portfolio.sql`)
+- Value at `p50` only when Passport ≥ C; unpriced lines listed with reason (never zero / guess)
+- Totals: “priced X of Y”; ranges p25–p75; unrealized = value − known cost; realized uses shared eBay fee table when fees omitted
+- CSV import (generic mapping) + export; migrate `pokemart_watchlist_v1` / `pokemart_collection_v1`
+- Share links: 128-bit token, revocable, cost hidden unless opted in
+- Browser-local Collection UI also tracks optional cost (no account)
 
 ## Auth model
 

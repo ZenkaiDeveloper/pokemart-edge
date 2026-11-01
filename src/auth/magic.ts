@@ -212,6 +212,20 @@ export async function hardDeleteUser(
     .prepare("DELETE FROM alert_delivery_budget WHERE user_id = ?")
     .bind(userId)
     .run();
+  // M2.2 portfolio: sales → holdings → valuation_history → share_link
+  const { results: holdings } = await db
+    .prepare(`SELECT id FROM holding WHERE user_id = ?`)
+    .bind(userId)
+    .all<{ id: string }>();
+  for (const h of holdings || []) {
+    await db.prepare(`DELETE FROM sale WHERE holding_id = ?`).bind(h.id).run();
+  }
+  await db.prepare("DELETE FROM holding WHERE user_id = ?").bind(userId).run();
+  await db
+    .prepare("DELETE FROM valuation_history WHERE user_id = ?")
+    .bind(userId)
+    .run();
+  await db.prepare("DELETE FROM share_link WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM login_tokens WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM consents WHERE user_id = ?").bind(userId).run();

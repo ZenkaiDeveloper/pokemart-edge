@@ -95,8 +95,9 @@ export function accountPage(opts: {
     body: `
       <h1>Your account</h1>
       <p>Signed in as <strong>${esc(opts.email)}</strong>.</p>
+      <p><a class="btn" href="/account/portfolio">Portfolio</a></p>
       <p><a class="btn" href="/account/alerts">Sold-evidence alerts</a></p>
-      <p>Alerts fire on Passport A–C cells only (sold-evidence changes), at most daily. Portfolio arrives later.</p>
+      <p>Portfolio values Passport A–C cells only. Alerts fire on sold-evidence changes, at most daily.</p>
       <form method="post" action="/account/logout"><button type="submit">Sign out</button></form>
       <hr>
       <form method="post" action="/account/delete"
@@ -233,5 +234,166 @@ export function unsubscribePage(opts: {
     title: "Unsubscribe",
     siteOrigin: opts.siteOrigin,
     body: `<h1>Unsubscribe</h1><p class="msg err">${esc(opts.error || "Invalid link.")}</p>`,
+  });
+}
+
+export type PortfolioLineView = {
+  id: string;
+  print_id: string;
+  grade_label: string;
+  qty: number;
+  remaining_qty: number;
+  cost_cents: number | null;
+  priced: boolean;
+  unpriced_reason: string | null;
+  line_value_cents: number | null;
+  line_low_cents: number | null;
+  line_high_cents: number | null;
+  passport_grade: string | null;
+};
+
+function usd(cents: number | null | undefined): string {
+  if (cents == null || !Number.isFinite(Number(cents))) return "—";
+  return `$${(Number(cents) / 100).toFixed(2)}`;
+}
+
+export function portfolioPage(opts: {
+  siteOrigin: string;
+  email: string;
+  summary: {
+    n_priced: number;
+    n_unpriced: number;
+    value_cents: number;
+    low_cents: number;
+    high_cents: number;
+    cost_basis_cents: number;
+    unrealized_cents: number | null;
+    realized_cents: number;
+  };
+  lines: PortfolioLineView[];
+  shareUrl?: string | null;
+  notice?: string;
+  error?: string;
+  readOnly?: boolean;
+  showCost?: boolean;
+}): string {
+  const notice = opts.notice ? `<p class="msg">${esc(opts.notice)}</p>` : "";
+  const error = opts.error ? `<p class="msg err">${esc(opts.error)}</p>` : "";
+  const totalLabel = `Priced ${opts.summary.n_priced} of ${
+    opts.summary.n_priced + opts.summary.n_unpriced
+  } items`;
+  const costBit =
+    opts.showCost === false
+      ? ""
+      : `<p>Cost basis (priced, known): <strong>${usd(opts.summary.cost_basis_cents)}</strong>
+         · Unrealized: <strong>${usd(opts.summary.unrealized_cents)}</strong>
+         · Realized: <strong>${usd(opts.summary.realized_cents)}</strong></p>`;
+  const rows = opts.lines.length
+    ? `<table style="width:100%;border-collapse:collapse;font-size:.9rem">
+        <thead><tr>
+          <th align="left">Print</th><th>Grade</th><th>Qty</th>
+          ${opts.showCost === false ? "" : "<th>Cost</th>"}
+          <th>Value</th><th>Passport</th><th></th>
+        </tr></thead><tbody>${opts.lines
+          .map((l) => {
+            const val = l.priced
+              ? `${usd(l.line_value_cents)} <span style="color:var(--muted)">(${usd(l.line_low_cents)}–${usd(l.line_high_cents)})</span>`
+              : `<em>unpriced</em>${l.unpriced_reason ? ` · ${esc(l.unpriced_reason)}` : ""}`;
+            const cost =
+              opts.showCost === false
+                ? ""
+                : `<td align="right">${usd(
+                    l.cost_cents == null
+                      ? null
+                      : l.cost_cents * l.remaining_qty,
+                  )}</td>`;
+            const del =
+              opts.readOnly
+                ? ""
+                : `<td><form style="display:inline" method="post" action="/account/portfolio/delete">
+                     <input type="hidden" name="id" value="${esc(l.id)}">
+                     <button type="submit">Remove</button></form></td>`;
+            return `<tr style="border-top:1px solid var(--line)">
+              <td><code>${esc(l.print_id)}</code></td>
+              <td align="center">${esc(l.grade_label)}</td>
+              <td align="center">${l.remaining_qty}/${l.qty}</td>
+              ${cost}
+              <td align="right">${val}</td>
+              <td align="center">${esc(l.passport_grade || "—")}</td>
+              ${del}
+            </tr>`;
+          })
+          .join("")}</tbody></table>`
+    : `<p>No holdings yet. Add a row below, import CSV, or migrate your browser Watch/Collection.</p>`;
+
+  const forms = opts.readOnly
+    ? ""
+    : `
+      <hr>
+      <h2>Add holding</h2>
+      <form method="post" action="/account/portfolio">
+        <label for="print_id">Print id</label>
+        <input id="print_id" name="print_id" required maxlength="256" placeholder="card key / print id">
+        <label for="grade_label">Grade label</label>
+        <input id="grade_label" name="grade_label" value="Ungraded" maxlength="64">
+        <label for="qty">Qty</label>
+        <input id="qty" name="qty" type="number" min="1" max="9999" value="1">
+        <label for="cost_cents">Cost per unit (cents, blank = unknown)</label>
+        <input id="cost_cents" name="cost_cents" inputmode="numeric" placeholder="e.g. 1250">
+        <label for="acquired_on">Acquired on (YYYY-MM-DD)</label>
+        <input id="acquired_on" name="acquired_on" placeholder="2026-10-01">
+        <button type="submit">Add</button>
+      </form>
+      <hr>
+      <h2>Import CSV</h2>
+      <p>Generic template: <code>print_id,grade_label,qty,cost_cents</code>. We do not promise Collectr/TCGplayer layouts until sample files are reviewed.</p>
+      <form method="post" action="/account/portfolio/import" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv,text/csv" required>
+        <button type="submit">Import</button>
+      </form>
+      <p><a href="/account/portfolio/export.csv">Export CSV</a></p>
+      <hr>
+      <h2>Migrate browser lists</h2>
+      <p>Paste <code>pokemart_watchlist_v1</code> or <code>pokemart_collection_v1</code> JSON (from Watch / Collection export).</p>
+      <form method="post" action="/account/portfolio/migrate">
+        <label for="local_json">JSON</label>
+        <textarea id="local_json" name="local_json" rows="6" style="font:inherit;width:100%;padding:.5rem;border:1px solid var(--line);border-radius:4px"></textarea>
+        <button type="submit">Migrate into portfolio</button>
+      </form>
+      <hr>
+      <h2>Share (read-only)</h2>
+      <form method="post" action="/account/portfolio/share">
+        <label><input type="checkbox" name="show_cost" value="1"> Include cost basis on the shared view</label>
+        <button type="submit">Create share link</button>
+      </form>
+      ${
+        opts.shareUrl
+          ? `<p class="msg">Share URL (save it): <a href="${esc(opts.shareUrl)}">${esc(opts.shareUrl)}</a></p>`
+          : ""
+      }
+      <form method="post" action="/account/portfolio/clear"
+            onsubmit="return confirm('Soft-delete all holdings?');">
+        <button class="danger" type="submit">Clear all holdings</button>
+      </form>
+    `;
+
+  return layout({
+    title: opts.readOnly ? "Shared portfolio" : "Portfolio",
+    siteOrigin: opts.siteOrigin,
+    body: `
+      <h1>${opts.readOnly ? "Shared portfolio" : "Portfolio"}</h1>
+      <p>Values use sold medians only when Price Passport is <strong>A–C</strong>. D-grade and missing cells stay <em>unpriced</em> — never zero, never guessed. ${esc(totalLabel)}.</p>
+      ${notice}${error}
+      ${
+        opts.readOnly
+          ? ""
+          : `<p>Signed in as ${esc(opts.email)}. <a href="/account/">Account</a> · <a href="/help/portfolio/">How portfolio works</a> · <a href="/collection/">Browser Collection</a></p>`
+      }
+      <p>Value: <strong>${usd(opts.summary.value_cents)}</strong>
+         · Range: ${usd(opts.summary.low_cents)} – ${usd(opts.summary.high_cents)}</p>
+      ${costBit}
+      ${rows}
+      ${forms}
+    `,
   });
 }
