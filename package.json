@@ -1,0 +1,17 @@
+{
+  "name": "pokemart-edge",
+  "version": "1.0.0",
+  "private": false,
+  "description": "PokeMart Edge — Cloudflare Worker + D1 magic-link accounts and nightly ladder export (MIT)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "deploy": "npx wrangler deploy",
+    "migrate:local": "npx wrangler d1 migrations apply pokemart-edge --local",
+    "migrate:remote": "npx wrangler d1 migrations apply pokemart-edge --remote"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

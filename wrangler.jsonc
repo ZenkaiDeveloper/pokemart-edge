@@ -1,0 +1,45 @@
+/**
+ * PokeMart Edge (M2.0 / PM-174) — magic-link accounts + D1 derived ladder.
+ *
+ * Deploy (Andy's Mac after wrangler login):
+ *   cd public_site/worker/pokemart-edge
+ *   npx wrangler d1 create pokemart-edge
+ *   # paste database_id below, then:
+ *   npx wrangler d1 migrations apply pokemart-edge --remote
+ *   npx wrangler r2 bucket create pokemart-edge-archive   # optional ARCHIVE
+ *   npx wrangler secret put SESSION_SECRET
+ *   npx wrangler secret put EXPORT_HMAC_SECRET
+ *   npx wrangler secret put RESEND_API_KEY                # or POSTMARK_SERVER_TOKEN
+ *   npx wrangler deploy
+ * Attach routes on pokemart.online: /account/* and /api/user/* (and /api/internal/*).
+ */
+{
+  "name": "pokemart-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "SITE_ORIGIN": "https://pokemart.online",
+    "EMAIL_FROM": "PokeMart <noreply@mail.pokemart.online>",
+    "EMAIL_PROVIDER": "resend",
+    "MAGIC_LINK_TTL_MINUTES": "15",
+    "SESSION_TTL_DAYS": "30",
+    "RATE_LIMIT_EMAIL_PER_HOUR": "3",
+    "RATE_LIMIT_IP_PER_HOUR": "10"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pokemart-edge",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ARCHIVE",
+      "bucket_name": "pokemart-edge-archive"
+    }
+  ]
+}
