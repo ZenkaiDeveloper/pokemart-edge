@@ -1,5 +1,5 @@
 /**
- * PokeMart Edge (M2.0 / PM-174) — magic-link accounts + D1 derived ladder.
+ * PokeMart Edge (M2.0 + M2.1) — magic-link accounts, D1 ladder, sold-evidence alerts.
  *
  * Deploy (Andy's Mac after wrangler login):
  *   cd public_site/worker/pokemart-edge
@@ -8,10 +8,12 @@
  *   npx wrangler d1 migrations apply pokemart-edge --remote
  *   npx wrangler r2 bucket create pokemart-edge-archive   # optional ARCHIVE
  *   npx wrangler secret put SESSION_SECRET
+ *   npx wrangler secret put WEBHOOK_ENC_SECRET            # Discord URL encryption
  *   npx wrangler secret put EXPORT_HMAC_SECRET
  *   npx wrangler secret put RESEND_API_KEY                # or POSTMARK_SERVER_TOKEN
  *   npx wrangler deploy
- * Attach routes on pokemart.online: /account/* and /api/user/* (and /api/internal/*).
+ * Attach routes on pokemart.online: /account/*, /api/user/*, /api/internal/*
+ * Cron: 10:00 UTC (after nightly Mac export / 04:00 local publish).
  */
 {
   "name": "pokemart-edge",
@@ -27,6 +29,9 @@
     "SESSION_TTL_DAYS": "30",
     "RATE_LIMIT_EMAIL_PER_HOUR": "3",
     "RATE_LIMIT_IP_PER_HOUR": "10"
+  },
+  "triggers": {
+    "crons": ["0 10 * * *"]
   },
   "d1_databases": [
     {

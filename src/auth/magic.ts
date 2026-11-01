@@ -190,6 +190,28 @@ export async function hardDeleteUser(
   db: DbPort,
   userId: string,
 ): Promise<void> {
+  // Alert events/deliveries for this user's rules
+  const { results: rules } = await db
+    .prepare(`SELECT id FROM alert_rule WHERE user_id = ?`)
+    .bind(userId)
+    .all<{ id: string }>();
+  for (const r of rules || []) {
+    const { results: events } = await db
+      .prepare(`SELECT id FROM alert_event WHERE rule_id = ?`)
+      .bind(r.id)
+      .all<{ id: string }>();
+    for (const e of events || []) {
+      await db.prepare(`DELETE FROM delivery WHERE event_id = ?`).bind(e.id).run();
+    }
+    await db.prepare(`DELETE FROM alert_event WHERE rule_id = ?`).bind(r.id).run();
+  }
+  await db.prepare("DELETE FROM alert_rule WHERE user_id = ?").bind(userId).run();
+  await db.prepare("DELETE FROM email_prefs WHERE user_id = ?").bind(userId).run();
+  await db.prepare("DELETE FROM rss_tokens WHERE user_id = ?").bind(userId).run();
+  await db
+    .prepare("DELETE FROM alert_delivery_budget WHERE user_id = ?")
+    .bind(userId)
+    .run();
   await db.prepare("DELETE FROM login_tokens WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM consents WHERE user_id = ?").bind(userId).run();

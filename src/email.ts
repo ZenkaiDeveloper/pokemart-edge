@@ -5,6 +5,8 @@ export type EmailMessage = {
   subject: string;
   text: string;
   html?: string;
+  /** Optional provider headers (List-Unsubscribe, etc.). */
+  headers?: Record<string, string>;
 };
 
 export type EmailSendResult = { ok: true; providerId?: string } | { ok: false; error: string };
@@ -39,6 +41,7 @@ export function resendEmail(apiKey: string, from: string): EmailPort {
           subject: msg.subject,
           text: msg.text,
           html: msg.html || undefined,
+          headers: msg.headers || undefined,
         }),
       });
       if (!res.ok) {
@@ -68,6 +71,9 @@ export function postmarkEmail(serverToken: string, from: string): EmailPort {
           TextBody: msg.text,
           HtmlBody: msg.html || undefined,
           MessageStream: "outbound",
+          Headers: msg.headers
+            ? Object.entries(msg.headers).map(([Name, Value]) => ({ Name, Value }))
+            : undefined,
         }),
       });
       if (!res.ok) {

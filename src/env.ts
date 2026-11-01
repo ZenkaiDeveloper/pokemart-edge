@@ -17,12 +17,23 @@ export type EdgeEnv = {
   RATE_LIMIT_EMAIL_PER_HOUR?: string;
   RATE_LIMIT_IP_PER_HOUR?: string;
   SESSION_SECRET?: string;
+  /** AES key material for Discord webhook ciphertext (falls back to SESSION_SECRET). */
+  WEBHOOK_ENC_SECRET?: string;
   EXPORT_HMAC_SECRET: string;
   RESEND_API_KEY?: string;
   POSTMARK_SERVER_TOKEN?: string;
   /** Test-only: when "1", login responses may include raw token. */
   TEST_EXPOSE_TOKEN?: string;
 };
+
+export function webhookEncSecret(env: EdgeEnv): string {
+  return (
+    env.WEBHOOK_ENC_SECRET ||
+    env.SESSION_SECRET ||
+    env.EXPORT_HMAC_SECRET ||
+    "dev-only-webhook-enc"
+  );
+}
 
 export function num(env: EdgeEnv, key: keyof EdgeEnv, fallback: number): number {
   const v = env[key];

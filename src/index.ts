@@ -1,5 +1,6 @@
 /**
- * PokeMart Edge Worker — /account/* + /api/user/* + signed ladder export ingest.
+ * PokeMart Edge Worker — /account/* + /api/user/* + signed ladder export ingest
+ * + M2.1 sold-evidence alerts (cron 10:00 UTC).
  * Does not write price data except via authenticated Mac export.
  */
 import { asDb, countUserOwned } from "./ports/db";
@@ -14,9 +15,32 @@ import {
   readSessionCookie,
   resolveSession,
 } from "./auth/session";
-import { accountPage, loginPage } from "./html";
+import {
+  accountPage,
+  alertsPage,
+  loginPage,
+  unsubscribePage,
+} from "./html";
 import { ingestExport, verifyExportHmac } from "./export_ingest";
-import { clientIp, makeEmailPort, num, siteOrigin, type EdgeEnv } from "./env";
+import {
+  clientIp,
+  makeEmailPort,
+  num,
+  siteOrigin,
+  webhookEncSecret,
+  type EdgeEnv,
+} from "./env";
+import { createRule, disableRule, listRules, mintRssToken } from "./alerts/rules";
+import {
+  confirmDoubleOptIn,
+  ensureEmailPrefs,
+  getEmailPrefs,
+  unsubscribeByToken,
+} from "./alerts/prefs";
+import { renderOptInEmail } from "./alerts/templates";
+import { buildUserRss } from "./alerts/rss";
+import { runAlertsCron } from "./alerts/run_cron";
+import { isoNow } from "./crypto_util";
 
 function html(body: string, status = 200, headers: HeadersInit = {}): Response {
   return new Response(body, {
@@ -35,17 +59,46 @@ function json(data: unknown, status = 200, headers: HeadersInit = {}): Response 
 async function currentUser(
   env: EdgeEnv,
   req: Request,
-): Promise<{ id: string; email: string } | null> {
+): Promise<{ id: string; email: string; tier: string } | null> {
   const db = asDb(env.DB);
   const sess = await resolveSession(db, readSessionCookie(req));
   if (!sess) return null;
   const row = await db
     .prepare(
-      `SELECT id, email FROM users WHERE id = ? AND deleted_at IS NULL`,
+      `SELECT id, email, tier FROM users WHERE id = ? AND deleted_at IS NULL`,
     )
     .bind(sess.userId)
-    .first<{ id: string; email: string }>();
+    .first<{ id: string; email: string; tier: string }>();
   return row || null;
+}
+
+async function renderAlerts(
+  env: EdgeEnv,
+  req: Request,
+  user: { id: string; email: string },
+  extra: { notice?: string; error?: string; rssUrl?: string | null } = {},
+): Promise<Response> {
+  const origin = siteOrigin(env, req);
+  const db = asDb(env.DB);
+  const rules = await listRules(db, user.id);
+  const prefs = await getEmailPrefs(db, user.id);
+  const url = new URL(req.url);
+  return html(
+    alertsPage({
+      siteOrigin: origin,
+      email: user.email,
+      rules,
+      emailOptedIn: Boolean(prefs?.double_opt_in_at),
+      emailUnsubscribed: Boolean(prefs?.unsubscribed_at),
+      rssUrl: extra.rssUrl,
+      notice: extra.notice,
+      error: extra.error,
+      prefill: {
+        print_id: url.searchParams.get("print_id") || undefined,
+        grade_label: url.searchParams.get("grade_label") || undefined,
+      },
+    }),
+  );
 }
 
 async function handleAccount(
@@ -186,6 +239,137 @@ async function handleAccount(
     });
   }
 
+  // --- M2.1 alerts ---
+  if (path === "/account/unsubscribe" || path === "/account/unsubscribe/") {
+    // One-click / List-Unsubscribe-Post — no login required.
+    let token = "";
+    if (req.method === "GET") {
+      token = new URL(req.url).searchParams.get("token") || "";
+    } else if (req.method === "POST") {
+      const ct = req.headers.get("content-type") || "";
+      if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) {
+        const form = await req.formData();
+        token = String(form.get("token") || form.get("List-Unsubscribe") || "");
+      } else {
+        token = new URL(req.url).searchParams.get("token") || "";
+      }
+      // RFC 8058 body may be List-Unsubscribe=One-Click with token in query.
+      if (!token) token = new URL(req.url).searchParams.get("token") || "";
+    } else {
+      return json({ error: "method_not_allowed" }, 405);
+    }
+    const result = await unsubscribeByToken(db, token);
+    if (!result.ok) {
+      return html(
+        unsubscribePage({ siteOrigin: origin, error: "That unsubscribe link is not valid." }),
+        400,
+      );
+    }
+    return html(unsubscribePage({ siteOrigin: origin, ok: true }));
+  }
+
+  if (path === "/account/alerts/confirm" || path === "/account/alerts/confirm/") {
+    const user = await currentUser(env, req);
+    if (!user) return Response.redirect(`${origin}/account/login`, 302);
+    await confirmDoubleOptIn(db, user.id);
+    return renderAlerts(env, req, user, {
+      notice: "Email alerts confirmed. You can create rules now.",
+    });
+  }
+
+  if (path === "/account/alerts/opt-in" || path === "/account/alerts/opt-in/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    await ensureEmailPrefs(db, user.id);
+    const confirmUrl = `${origin}/account/alerts/confirm`;
+    const body = renderOptInEmail({ confirmUrl });
+    await makeEmailPort(env).send({
+      to: user.email,
+      subject: body.subject,
+      text: body.text,
+      html: body.html,
+    });
+    return renderAlerts(env, req, user, {
+      notice: "Confirmation email sent — open the link to enable alert mail.",
+    });
+  }
+
+  if (path === "/account/alerts/rss-token" || path === "/account/alerts/rss-token/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const raw = await mintRssToken(db, user.id);
+    const rssUrl = `${origin}/account/alerts/rss.xml?token=${encodeURIComponent(raw)}`;
+    return renderAlerts(env, req, user, {
+      notice: "RSS token minted. Save this URL — it is shown once.",
+      rssUrl,
+    });
+  }
+
+  if (path === "/account/alerts/rss.xml" || path === "/account/alerts/rss.xml/") {
+    const token = new URL(req.url).searchParams.get("token") || "";
+    const feed = await buildUserRss(db, { rawToken: token, siteOrigin: origin });
+    if (!feed.ok) return json({ error: feed.error }, feed.status);
+    return new Response(feed.xml, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/rss+xml; charset=utf-8",
+        "Cache-Control": "private, max-age=300",
+      },
+    });
+  }
+
+  if (path === "/account/alerts/disable" || path === "/account/alerts/disable/") {
+    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    const form = await req.formData();
+    const id = String(form.get("id") || "");
+    const ok = await disableRule(db, user.id, id);
+    return renderAlerts(env, req, user, {
+      notice: ok ? "Rule disabled." : undefined,
+      error: ok ? undefined : "Rule not found.",
+    });
+  }
+
+  if (path === "/account/alerts" || path === "/account/alerts/") {
+    const user = await currentUser(env, req);
+    if (!user) {
+      const next = encodeURIComponent(
+        `/account/alerts${new URL(req.url).search || ""}`,
+      );
+      return Response.redirect(`${origin}/account/login?next=${next}`, 302);
+    }
+    if (req.method === "GET") {
+      return renderAlerts(env, req, user);
+    }
+    if (req.method === "POST") {
+      const form = await req.formData();
+      const thresholdRaw = String(form.get("threshold") || "").trim();
+      const result = await createRule({
+        db,
+        userId: user.id,
+        printId: String(form.get("print_id") || ""),
+        gradeLabel: String(form.get("grade_label") || ""),
+        kind: String(form.get("kind") || ""),
+        threshold: thresholdRaw === "" ? null : Number(thresholdRaw),
+        channel: String(form.get("channel") || "email"),
+        webhookUrl: String(form.get("webhook_url") || "") || null,
+        encSecret: webhookEncSecret(env),
+        tier: user.tier,
+      });
+      if (!result.ok) {
+        return renderAlerts(env, req, user, { error: result.error });
+      }
+      if (result.rule.channel === "email") {
+        await ensureEmailPrefs(db, user.id);
+      }
+      return renderAlerts(env, req, user, { notice: "Alert rule created." });
+    }
+    return json({ error: "method_not_allowed" }, 405);
+  }
+
   return json({ error: "not_found" }, 404);
 }
 
@@ -198,7 +382,7 @@ async function handleApiUser(
   if (path === "/api/user/me" || path === "/api/user/me/") {
     const user = await currentUser(env, req);
     if (!user) return json({ error: "unauthorized" }, 401);
-    return json({ id: user.id, email: user.email, tier: "free" });
+    return json({ id: user.id, email: user.email, tier: user.tier || "free" });
   }
   if (path === "/api/user/delete" || path === "/api/user/delete/") {
     if (req.method !== "POST" && req.method !== "DELETE") {
@@ -213,6 +397,34 @@ async function handleApiUser(
       200,
       { "Set-Cookie": clearSessionCookieHeader() },
     );
+  }
+  if (path === "/api/user/alerts" || path === "/api/user/alerts/") {
+    const user = await currentUser(env, req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    if (req.method === "GET") {
+      return json({ rules: await listRules(db, user.id) });
+    }
+    if (req.method === "POST") {
+      const body = (await req.json()) as Record<string, unknown>;
+      const result = await createRule({
+        db,
+        userId: user.id,
+        printId: String(body.print_id || ""),
+        gradeLabel: String(body.grade_label || ""),
+        kind: String(body.kind || ""),
+        threshold:
+          body.threshold == null || body.threshold === ""
+            ? null
+            : Number(body.threshold),
+        channel: String(body.channel || "email"),
+        webhookUrl: body.webhook_url ? String(body.webhook_url) : null,
+        encSecret: webhookEncSecret(env),
+        tier: user.tier,
+      });
+      if (!result.ok) return json({ error: result.error }, result.status);
+      return json({ ok: true, rule: result.rule }, 201);
+    }
+    return json({ error: "method_not_allowed" }, 405);
   }
   return json({ error: "not_found" }, 404);
 }
@@ -269,10 +481,30 @@ async function fetchHandler(req: Request, env: EdgeEnv): Promise<Response> {
     return handleExport(req, env);
   }
   if (path === "/health" || path === "/health/") {
-    return json({ ok: true, service: "pokemart-edge" });
+    return json({
+      ok: true,
+      service: "pokemart-edge",
+      alerts: true,
+      at: isoNow(),
+    });
   }
   return json({ error: "not_found" }, 404);
 }
 
-export default { fetch: fetchHandler };
-export { fetchHandler as handleRequest };
+async function scheduledHandler(
+  _event: ScheduledEvent,
+  env: EdgeEnv,
+  _ctx: ExecutionContext,
+): Promise<void> {
+  await runAlertsCron(asDb(env.DB), {
+    emailPort: makeEmailPort(env),
+    encSecret: webhookEncSecret(env),
+    siteOrigin: env.SITE_ORIGIN || "https://pokemart.online",
+  });
+}
+
+export default {
+  fetch: fetchHandler,
+  scheduled: scheduledHandler,
+};
+export { fetchHandler as handleRequest, scheduledHandler };

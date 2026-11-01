@@ -26,7 +26,15 @@ export async function countUserOwned(
   db: DbPort,
   userId: string,
 ): Promise<Record<string, number>> {
-  const tables = ["login_tokens", "sessions", "consents"] as const;
+  const tables = [
+    "login_tokens",
+    "sessions",
+    "consents",
+    "alert_rule",
+    "email_prefs",
+    "rss_tokens",
+    "alert_delivery_budget",
+  ] as const;
   const out: Record<string, number> = { users: 0 };
   const u = await db
     .prepare("SELECT COUNT(*) AS n FROM users WHERE id = ?")

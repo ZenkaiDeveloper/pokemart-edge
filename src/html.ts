@@ -95,7 +95,8 @@ export function accountPage(opts: {
     body: `
       <h1>Your account</h1>
       <p>Signed in as <strong>${esc(opts.email)}</strong>.</p>
-      <p>Alerts and portfolio arrive in later milestones. For now this account holds your email and session only.</p>
+      <p><a class="btn" href="/account/alerts">Sold-evidence alerts</a></p>
+      <p>Alerts fire on Passport A–C cells only (sold-evidence changes), at most daily. Portfolio arrives later.</p>
       <form method="post" action="/account/logout"><button type="submit">Sign out</button></form>
       <hr>
       <form method="post" action="/account/delete"
@@ -104,5 +105,133 @@ export function accountPage(opts: {
         <button class="danger" type="submit">Delete account</button>
       </form>
     `,
+  });
+}
+
+export type AlertRuleView = {
+  id: string;
+  print_id: string;
+  grade_label: string;
+  kind: string;
+  threshold: number | null;
+  channel: string;
+  disabled_at: string | null;
+};
+
+export function alertsPage(opts: {
+  siteOrigin: string;
+  email: string;
+  rules: AlertRuleView[];
+  emailOptedIn: boolean;
+  emailUnsubscribed: boolean;
+  rssUrl?: string | null;
+  notice?: string;
+  error?: string;
+  prefill?: { print_id?: string; grade_label?: string };
+}): string {
+  const notice = opts.notice ? `<p class="msg">${esc(opts.notice)}</p>` : "";
+  const error = opts.error ? `<p class="msg err">${esc(opts.error)}</p>` : "";
+  const status = opts.emailUnsubscribed
+    ? `<p class="msg">Email alerts are unsubscribed. Create a rule and confirm again to re-enable.</p>`
+    : opts.emailOptedIn
+      ? `<p class="msg">Email alerts confirmed (double opt-in).</p>`
+      : `<p class="msg">Email alerts need a one-time confirmation before anything is sent.</p>`;
+
+  const rows = opts.rules.length
+    ? `<ul>${opts.rules
+        .map((r) => {
+          const th =
+            r.threshold == null
+              ? ""
+              : r.kind === "pct_move_7d"
+                ? ` · ${r.threshold} bps`
+                : ` · $${(Number(r.threshold) / 100).toFixed(2)}`;
+          const dis = r.disabled_at ? " (disabled)" : "";
+          return (
+            `<li><code>${esc(r.print_id)}</code> / ${esc(r.grade_label)} — ` +
+            `${esc(r.kind)}${esc(th)} via ${esc(r.channel)}${esc(dis)}` +
+            (r.disabled_at
+              ? ""
+              : ` <form style="display:inline" method="post" action="/account/alerts/disable">` +
+                `<input type="hidden" name="id" value="${esc(r.id)}">` +
+                `<button type="submit">Disable</button></form>`) +
+            `</li>`
+          );
+        })
+        .join("")}</ul>`
+    : `<p>No alert rules yet. Follow cards on <a href="/watch/">Watch</a>, then create a rule below.</p>`;
+
+  const prefPrint = esc(opts.prefill?.print_id || "");
+  const prefGrade = esc(opts.prefill?.grade_label || "Ungraded");
+  const rss = opts.rssUrl
+    ? `<p>Your private RSS feed: <a href="${esc(opts.rssUrl)}">${esc(opts.rssUrl)}</a></p>`
+    : "";
+
+  return layout({
+    title: "Alerts",
+    siteOrigin: opts.siteOrigin,
+    body: `
+      <h1>Sold-evidence alerts</h1>
+      <p>Email, Discord webhook, or private RSS when a followed card’s Passport A–C median or evidence changes. At most one digest email per day. No live-listing or restock alerts.</p>
+      ${notice}${error}${status}
+      <p>Signed in as ${esc(opts.email)}. <a href="/account/">Account</a> · <a href="/help/alerts/">How alerts work</a></p>
+      <h2>Your rules (${opts.rules.filter((r) => !r.disabled_at).length} / 20 free)</h2>
+      ${rows}
+      <hr>
+      <h2>Create alert</h2>
+      <form method="post" action="/account/alerts">
+        <label for="print_id">Print id</label>
+        <input id="print_id" name="print_id" required maxlength="128" value="${prefPrint}"
+               placeholder="from Watch / card page">
+        <label for="grade_label">Grade label</label>
+        <input id="grade_label" name="grade_label" required maxlength="64" value="${prefGrade}">
+        <label for="kind">Kind</label>
+        <select id="kind" name="kind">
+          <option value="median_above">Median above (cents)</option>
+          <option value="median_below">Median below (cents)</option>
+          <option value="pct_move_7d">7-day % move (basis points)</option>
+          <option value="new_comp">New comps</option>
+          <option value="passport_change">Passport grade change</option>
+        </select>
+        <label for="threshold">Threshold (cents or bps; blank for new_comp / passport_change)</label>
+        <input id="threshold" name="threshold" inputmode="numeric" placeholder="e.g. 5000 or 1000">
+        <label for="channel">Channel</label>
+        <select id="channel" name="channel">
+          <option value="email">Email</option>
+          <option value="discord_webhook">Discord webhook</option>
+          <option value="rss">Private RSS</option>
+        </select>
+        <label for="webhook_url">Discord webhook URL (Discord channel only)</label>
+        <input id="webhook_url" name="webhook_url" type="url" maxlength="300"
+               placeholder="https://discord.com/api/webhooks/…">
+        <button type="submit">Create alert</button>
+      </form>
+      <form method="post" action="/account/alerts/opt-in" style="margin-top:1rem">
+        <button type="submit">Send email confirmation (double opt-in)</button>
+      </form>
+      <form method="post" action="/account/alerts/rss-token" style="margin-top:.5rem">
+        <button type="submit">Mint / rotate RSS token</button>
+      </form>
+      ${rss}
+    `,
+  });
+}
+
+export function unsubscribePage(opts: {
+  siteOrigin: string;
+  ok?: boolean;
+  error?: string;
+}): string {
+  if (opts.ok) {
+    return layout({
+      title: "Unsubscribed",
+      siteOrigin: opts.siteOrigin,
+      body: `<h1>Unsubscribed</h1><p>You will not receive further alert emails. Sign in anytime to re-confirm.</p>`,
+    });
+  }
+  return layout({
+    title: "Unsubscribe",
+    siteOrigin: opts.siteOrigin,
+    body: `<h1>Unsubscribe</h1><p class="msg err">${esc(opts.error || "Invalid link.")}</p>`,
   });
 }

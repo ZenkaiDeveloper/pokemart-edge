@@ -24,6 +24,8 @@ export type LadderHistoryRow = {
   snapshot_date: string;
   p50: number | null;
   n: number | null;
+  passport_grade?: string | null;
+  newest_sold_at?: string | null;
 };
 
 export type ExportPayload = {
@@ -158,13 +160,37 @@ export async function ingestExport(
   let historyWritten = 0;
   for (const row of history) {
     if (writes + 2 > MAX_WRITES_PER_NIGHT) break; // leave room for export_log
+    // Prefer explicit history fields; fall back to matching ladder_latest row.
+    const passport =
+      row.passport_grade != null
+        ? String(row.passport_grade)
+        : String(
+            (latest.find(
+              (l) =>
+                l.print_id === row.print_id &&
+                l.grade_label === row.grade_label,
+            ) || {}).passport_grade || "D",
+          );
+    const newest =
+      row.newest_sold_at !== undefined
+        ? row.newest_sold_at == null
+          ? null
+          : String(row.newest_sold_at)
+        : (latest.find(
+            (l) =>
+              l.print_id === row.print_id &&
+              l.grade_label === row.grade_label,
+          ) || {}).newest_sold_at ?? null;
     await db
       .prepare(
         `INSERT INTO ladder_history_90d (
-           print_id, grade_label, snapshot_date, p50, n
-         ) VALUES (?, ?, ?, ?, ?)
+           print_id, grade_label, snapshot_date, p50, n,
+           passport_grade, newest_sold_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(print_id, grade_label, snapshot_date) DO UPDATE SET
-           p50 = excluded.p50, n = excluded.n`,
+           p50 = excluded.p50, n = excluded.n,
+           passport_grade = excluded.passport_grade,
+           newest_sold_at = excluded.newest_sold_at`,
       )
       .bind(
         String(row.print_id),
@@ -172,6 +198,8 @@ export async function ingestExport(
         String(row.snapshot_date).slice(0, 10),
         row.p50 == null ? null : Number(row.p50),
         row.n == null ? null : Number(row.n),
+        passport,
+        newest == null ? null : String(newest),
       )
       .run();
     writes += 1;
